@@ -1,0 +1,172 @@
+service: react-app-deployment
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-west-2
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:*
+            - codebuild:*
+            - codepipeline:*
+            - iam:PassRole
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - "s3:PutBucketPolicy"
+            - "s3:GetBucketPolicy"
+            - "s3:DeleteBucketPolicy"
+          Resource: "arn:aws:s3:::omor-react-app-bucket"
+
+functions:
+  deploy:
+    handler: handler.deploy
+
+resources:
+  Resources:
+    ReactAppBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: omor-react-app-bucket
+        WebsiteConfiguration:
+          IndexDocument: index.html
+          ErrorDocument: index.html
+
+    S3BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket:
+          Ref: ReactAppBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource:
+                Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: ReactAppBucket
+                    - "/*"
+
+    CodeBuildServiceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: codebuild-service-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codebuild.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CodeBuildPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:*
+                    - logs:*
+                    - cloudwatch:*
+                  Resource: "*"
+
+    CodeBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Name: react-build
+        Source:
+          Type: GITHUB
+          Location: "https://github.com/OmorFarukRakib/hello-world-react-app"
+        Artifacts:
+          Type: S3
+          Location: !Ref ReactAppBucket
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: "aws/codebuild/standard:5.0"
+          Type: LINUX_CONTAINER
+          EnvironmentVariables:
+            - Name: NODE_ENV
+              Value: production
+        ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+
+    CodePipelineServiceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: codepipeline-service-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: codepipeline.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CodePipelinePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:*
+                    - codebuild:*
+                    - codedeploy:*
+                    - iam:PassRole
+                  Resource: "*"
+
+    CodePipeline:
+      Type: AWS::CodePipeline::Pipeline
+      Properties:
+        Name: react-pipeline
+        RoleArn: !GetAtt CodePipelineServiceRole.Arn
+        ArtifactStore:
+          Type: S3
+          Location: !Ref ReactAppBucket
+        Stages:
+          - Name: Source
+            Actions:
+              - Name: Source
+                ActionTypeId:
+                  Category: Source
+                  Owner: ThirdParty
+                  Provider: GitHub
+                  Version: 1
+                OutputArtifacts:
+                  - Name: source_output
+                Configuration:
+                  Owner: OmorFarukRakib
+                  Repo: hello-world-react-app
+                  Branch: main
+
+          - Name: Build
+            Actions:
+              - Name: Build
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Provider: CodeBuild
+                  Version: 1
+                InputArtifacts:
+                  - Name: source_output
+                OutputArtifacts:
+                  - Name: build_output
+                Configuration:
+                  ProjectName: !Ref CodeBuildProject
+
+          - Name: Deploy
+            Actions:
+              - Name: Deploy
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: S3
+                  Version: 1
+                InputArtifacts:
+                  - Name: build_output
+                Configuration:
+                  BucketName: !Ref ReactAppBucket
+                  Extract: true
